@@ -22,7 +22,7 @@ SYSTEM = """You are a semantic geometry engine. Given a world state (entity posi
 Format:
 {"entities":{"name":{"x":0.0,"y":0.0,"z":0.0}},"relations":[{"f":"from","t":"to","r":"relation_type"}],"next":"...","jump":"..."}
 
-Rules: physical concepts low Z, abstract high Z. Cause/effect close together. Opposites far apart. Both must be short declarative factual statements, not questions. Next must introduce at least one concept not present in current entities. Jump must be a factual statement from a domain unrelated to current entities. Output raw JSON only, no markdown, no fences, no explanation."""
+Rules: physical concepts low Z, abstract high Z. Cause/effect close together. Opposites far apart. Both must be short declarative factual statements, not questions. Next must introduce at least one concept not present in current entities. Jump must be a factual statement from a domain unrelated to current entities. Jump must never use entities already seen in conversation history. Output raw JSON only, no markdown, no fences, no explanation."""
 
 def call_ollama(prompt):
     r = requests.post(OLLAMA_URL, json={
@@ -48,13 +48,14 @@ def extract_json(text):
     return json.loads("\n".join(lines))
 
 def build_prompt(state, sentence):
+    seen = list(state.get("entities", {}).keys())
     # Keep state compact - only positions, truncate if huge
     state_str = json.dumps(state, separators=(',', ':'))
     if len(state_str) > 2000:
         # Keep only entities, drop relations from state to save context
         compact = {"entities": state.get("entities", {})}
         state_str = json.dumps(compact, separators=(',', ':'))
-    return f"STATE:{state_str}\nSENTENCE:{sentence}\nOUTPUT:"
+    return f"seen_entities:{json.dumps(seen)}\nSTATE:{state_str}\nSENTENCE:{sentence}\nOUTPUT:"
 
 def load_state():
     try:
