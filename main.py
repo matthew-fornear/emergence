@@ -6,6 +6,8 @@ MODEL = "qwen2.5-coder:14b-instruct"
 STATE_FILE = "world_state.json"
 RUN_FILE = "run_checkpoint.json"
 LOG_DIR = "log"
+CHECKPOINT_DIR = "checkpoint"
+WORLDSTATE_DIR = "worldstate"
 VISUALIZE_DIR = "visualize"
 VISUALIZE_EVERY = 50
 
@@ -53,7 +55,25 @@ def extract_json(text):
         lines.pop(0)
     while lines and lines[-1].strip().startswith("`"):
         lines.pop()
-    return json.loads("\n".join(lines))
+    chunk = "\n".join(lines)
+
+    # Repair common LLM JSON mistakes: trailing commas before } or ]
+    chunk = re.sub(r",\s*}", "}", chunk)
+    chunk = re.sub(r",\s*]", "]", chunk)
+
+    try:
+        return json.loads(chunk)
+    except json.JSONDecodeError:
+        # Last resort: strip to first complete top-level object by brace count
+        depth, i, n = 0, 0, len(chunk)
+        for i in range(n):
+            if chunk[i] == "{":
+                depth += 1
+            elif chunk[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(chunk[: i + 1])
+        raise
 
 BANNED_SENTENCES_SIZE = 20
 
@@ -68,11 +88,17 @@ def build_prompt(state, sentence, banned_sentences=None):
         state_str = json.dumps(payload, separators=(',', ':'))
     return f"seen_entities:{json.dumps(seen)}\ndomains_covered:{json.dumps(domains)}\nbanned_sentences:{json.dumps(banned)}\nSTATE:{state_str}\nSENTENCE:{sentence}\nOUTPUT:"
 
-def load_state():
-    try:
-        with open(STATE_FILE) as f:
-            state = json.load(f)
-    except Exception:
+def load_state(state_file, fallback_path=None):
+    for path in (state_file, fallback_path):
+        if not path:
+            continue
+        try:
+            with open(path) as f:
+                state = json.load(f)
+            break
+        except Exception:
+            continue
+    else:
         return {"entities": {}, "relations": []}
     if "dirty" in state and isinstance(state["dirty"], list):
         state["dirty"] = set(state["dirty"])
@@ -80,11 +106,12 @@ def load_state():
     state.setdefault("domains_covered", ["physics", "geography"])
     return state
 
-def save_state(state):
+def save_state(state, state_file):
     to_save = dict(state)
     if "dirty" in to_save and isinstance(to_save["dirty"], set):
         to_save["dirty"] = list(to_save["dirty"])
-    with open(STATE_FILE, "w") as f:
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    with open(state_file, "w") as f:
         json.dump(to_save, f, indent=2)
 
 def mark_dirty(state, new_entity, radius=DIRTY_RADIUS):
@@ -100,20 +127,38 @@ def mark_dirty(state, new_entity, radius=DIRTY_RADIUS):
             state["dirty"].add(name)
 
 def load_checkpoint():
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    try:
+        files = [f for f in os.listdir(CHECKPOINT_DIR) if f.endswith(".json")]
+        if files:
+            files.sort(key=lambda f: int(f.replace(".json", "")) if f.replace(".json", "").isdigit() else 0)
+            latest = files[-1]
+            run_ts = int(latest.replace(".json", ""))
+            with open(os.path.join(CHECKPOINT_DIR, latest)) as f:
+                c = json.load(f)
+            return c.get("sentence"), c.get("turn", 1), c.get("banned_sentences", []), run_ts
+    except Exception:
+        pass
     try:
         with open(RUN_FILE) as f:
             c = json.load(f)
-        return c.get("sentence"), c.get("turn", 1), c.get("banned_sentences", [])
+        return c.get("sentence"), c.get("turn", 1), c.get("banned_sentences", []), None
     except Exception:
-        return None, None, []
+        return None, None, [], None
 
-def save_checkpoint(sentence, turn, banned_sentences=None):
-    with open(RUN_FILE, "w") as f:
+def save_checkpoint(sentence, turn, banned_sentences=None, run_ts=None):
+    if run_ts is None:
+        return
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    path = os.path.join(CHECKPOINT_DIR, f"{run_ts}.json")
+    with open(path, "w") as f:
         json.dump({"sentence": sentence, "turn": turn, "banned_sentences": banned_sentences or []}, f)
 
-def delete_checkpoint():
+def delete_checkpoint(run_ts):
+    if run_ts is None:
+        return
     try:
-        os.remove(RUN_FILE)
+        os.remove(os.path.join(CHECKPOINT_DIR, f"{run_ts}.json"))
     except Exception:
         pass
 
@@ -150,17 +195,27 @@ def run(iterations=None, sentence="The ball falls because gravity pulls it down.
     except Exception:
         render_to_dir = None
 
-    state = load_state()
-    fallback = "Water flows downhill."
-    start_turn = 1
-    sentence_turn = 0
-    banned_sentences = []
-    checkpoint_sentence, checkpoint_turn, checkpoint_banned = load_checkpoint()
-    if checkpoint_sentence is not None and checkpoint_turn is not None and (iterations is None or checkpoint_turn <= iterations):
+    checkpoint_sentence, checkpoint_turn, checkpoint_banned, checkpoint_run_ts = load_checkpoint()
+    if checkpoint_run_ts is not None and checkpoint_sentence is not None and checkpoint_turn is not None and (iterations is None or checkpoint_turn <= iterations):
+        run_ts = checkpoint_run_ts
         sentence = checkpoint_sentence
         start_turn = checkpoint_turn
         banned_sentences = checkpoint_banned or []
         print(f"Resuming from turn {start_turn} with sentence: {sentence}")
+    else:
+        run_ts = int(time.time())
+        sentence = "The ball falls because gravity pulls it down."
+        start_turn = 1
+        banned_sentences = checkpoint_banned if checkpoint_run_ts is None and checkpoint_banned else []
+        if checkpoint_run_ts is None and checkpoint_sentence is not None:
+            sentence = checkpoint_sentence
+            start_turn = checkpoint_turn or 1
+
+    state_file = os.path.join(WORLDSTATE_DIR, f"{run_ts}.json")
+    state = load_state(state_file, STATE_FILE if checkpoint_run_ts is None and (checkpoint_sentence is not None) else None)
+    fallback = "Water flows downhill."
+
+    sentence_turn = start_turn - 1
 
     turn_range = range(start_turn, iterations + 1) if iterations is not None else itertools.count(start_turn)
     try:
@@ -174,7 +229,7 @@ def run(iterations=None, sentence="The ball falls because gravity pulls it down.
                     raw = call_ollama(SYSTEM_REFINE + "\n" + prompt)
                     result = extract_json(raw)
                     state = merge(state, result)
-                    save_state(state)
+                    save_state(state, state_file)
                     pos = result.get("entities", {}).get(entity, {})
                     pos_str = f"({pos.get('x',0):.2f},{pos.get('y',0):.2f},{pos.get('z',0):.2f})" if pos else "?"
                     print(f"    repositioned: {entity} {pos_str}")
@@ -182,9 +237,14 @@ def run(iterations=None, sentence="The ball falls because gravity pulls it down.
                         "turn=%d refine entity=%r new_position=%s",
                         turn, entity, pos_str,
                     )
-                    save_checkpoint(sentence, turn + 1, banned_sentences)
+                    save_checkpoint(sentence, turn + 1, banned_sentences, run_ts)
                 except Exception as e:
+                    try:
+                        raw_str = raw
+                    except NameError:
+                        raw_str = "<no response>"
                     logging.exception("turn=%d refine failed: %s", turn, e)
+                    logging.info("refine turn=%d raw_output:\n%s", turn, raw_str)
                     try:
                         print(f"    ERROR: {e}\n    raw: {raw[:200]}")
                     except NameError:
@@ -203,7 +263,7 @@ def run(iterations=None, sentence="The ball falls because gravity pulls it down.
                     for name in result.get("entities", {}):
                         if name not in old_entities:
                             mark_dirty(state, name, DIRTY_RADIUS)
-                    save_state(state)
+                    save_state(state, state_file)
                     next_sentence = result.get("jump", result.get("next", fallback)) if use_jump else result.get("next", result.get("jump", fallback))
                     entities = result.get("entities", {})
                     relations = result.get("relations", [])
@@ -221,15 +281,20 @@ def run(iterations=None, sentence="The ball falls because gravity pulls it down.
                     banned_sentences = banned_sentences[-BANNED_SENTENCES_SIZE:]
                     sentence = next_sentence
                     sentence_turn += 1
-                    save_checkpoint(sentence, turn + 1, banned_sentences)
+                    save_checkpoint(sentence, turn + 1, banned_sentences, run_ts)
                 except Exception as e:
+                    try:
+                        raw_str = raw
+                    except NameError:
+                        raw_str = "<no response>"
                     logging.exception("turn=%d failed: %s", turn, e)
+                    logging.info("turn=%d raw_output:\n%s", turn, raw_str)
                     try:
                         print(f"    ERROR: {e}\n    raw: {raw[:200]}")
                     except NameError:
                         print(f"    ERROR: {e}")
                     sentence = fallback
-                    save_checkpoint(sentence, turn + 1, banned_sentences)
+                    save_checkpoint(sentence, turn + 1, banned_sentences, run_ts)
                     time.sleep(1)
             time.sleep(0.5)
 
@@ -244,9 +309,9 @@ def run(iterations=None, sentence="The ball falls because gravity pulls it down.
         print("\nStopped by user. Checkpoint saved; run again to resume.")
     finally:
         if iterations is not None:
-            delete_checkpoint()
+            delete_checkpoint(run_ts)
             print(f"\nDone. World state has {len(state['entities'])} entities, {len(state['relations'])} relations.")
-        print(f"Saved to {STATE_FILE}")
+        print(f"Saved to {state_file}")
 
 if __name__ == "__main__":
     run()

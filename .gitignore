@@ -7,3 +7,5 @@ run_checkpoint.json
 world_xy.png
 world_3d.png
 visualize/
+checkpoint/
+worldstate/
