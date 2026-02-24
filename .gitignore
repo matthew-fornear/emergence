@@ -1,0 +1,8 @@
+# Logs
+log/
+
+# Output / runtime
+world_state.json
+run_checkpoint.json
+world_xy.png
+world_3d.png
