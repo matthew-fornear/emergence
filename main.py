@@ -22,19 +22,19 @@ SYSTEM = """You are a semantic geometry engine. Given a world state (entity posi
 Format:
 {"entities":{"name":{"x":0.0,"y":0.0,"z":0.0}},"relations":[{"f":"from","t":"to","r":"relation_type"}],"next":"...","jump":"..."}
 
-Rules: physical concepts low Z, abstract high Z. Cause/effect close together. Opposites far apart. Both must be short declarative factual statements, not questions. Next must introduce at least one concept not present in current entities. Jump must be a factual statement from a domain unrelated to current entities. Jump must never use entities already seen in conversation history. Output raw JSON only, no markdown, no fences, no explanation."""
+Rules: physical concepts low Z, abstract high Z. Cause/effect close together. Opposites far apart. Both must be short declarative factual statements, not questions. Next must introduce at least one concept not present in current entities. Jump must be a factual statement from a domain unrelated to current entities. Jump must never use entities already seen in conversation history. Output only entities and relations for this sentence (new or updated), not the full state. Output raw JSON only, no markdown, no fences, no explanation."""
 
 SYSTEM_REFINE = """You are a semantic geometry engine. Given the current world state and an entity name, output ONLY valid JSON with the corrected position for that entity: {"entities":{"name":{"x":0.0,"y":0.0,"z":0.0}}}. Rules: physical/concrete low Z, abstract high Z. Cause/effect and related concepts close together. Output raw JSON only, no markdown, no fences."""
 
 REFINE_EVERY = 5
 DIRTY_RADIUS = 0.3
 
-def call_ollama(prompt):
+def call_ollama(prompt, num_predict=2048):
     r = requests.post(OLLAMA_URL, json={
         "model": MODEL,
         "prompt": prompt,
         "stream": False,
-        "options": {"temperature": 0.3, "num_predict": 800}
+        "options": {"temperature": 0.3, "num_predict": num_predict}
     })
     return r.json()["response"].strip()
 
@@ -196,6 +196,8 @@ def run(iterations=500, sentence="The ball falls because gravity pulls it down."
             except Exception as e:
                 logging.exception("turn=%d failed: %s", turn, e)
                 print(f"    ERROR: {e}\n    raw: {raw[:200]}")
+                sentence = fallback
+                save_checkpoint(sentence, turn + 1)
                 time.sleep(1)
         time.sleep(0.5)
 
